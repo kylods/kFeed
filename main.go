@@ -47,6 +47,9 @@ func main() {
 	v1Router.Get("/users", apiCfg.middlewareAuth(apiCfg.handlerUsersGet))
 	v1Router.Post("/feeds", apiCfg.middlewareAuth(apiCfg.handlerFeedsPost))
 	v1Router.Get("/feeds", apiCfg.handlerFeedsGet)
+	v1Router.Post("/feed_follows", apiCfg.middlewareAuth(apiCfg.handlerFeedFollowsPost))
+	v1Router.Delete("/feed_follows/{id}", apiCfg.middlewareAuth(apiCfg.handlerFeedFollowsDelete))
+	v1Router.Get("/feed_follows", apiCfg.middlewareAuth(apiCfg.handlerFeedFollowsGet))
 	v1Router.Get("/readiness", handlerReadinessGet)
 	v1Router.Get("/err", errTest)
 
@@ -138,7 +141,29 @@ func (cfg *apiConfig) handlerFeedsPost(w http.ResponseWriter, r *http.Request, u
 		respondWithError(w, 500, "Something went wrong")
 		return
 	}
-	respondWithJSON(w, 201, feed)
+
+	followParams := database.FollowFeedParams{
+		ID:        uuid.New(),
+		UserID:    user.ID,
+		FeedID:    feed.ID,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	feedFollow, err := cfg.DB.FollowFeed(r.Context(), followParams)
+	if err != nil {
+		log.Printf("Error following feed: %s", err)
+		respondWithError(w, 500, "Something went wrong")
+		return
+	}
+
+	payload := struct {
+		Feed       database.Feed       `json:"feed"`
+		FeedFollow database.FeedFollow `json:"feed_follow"`
+	}{
+		Feed:       feed,
+		FeedFollow: feedFollow,
+	}
+	respondWithJSON(w, 201, payload)
 }
 
 // Retrieves all feeds
@@ -149,6 +174,75 @@ func (cfg *apiConfig) handlerFeedsGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respondWithJSON(w, 200, feeds)
+}
+
+// Follows a feed
+func (cfg *apiConfig) handlerFeedFollowsPost(w http.ResponseWriter, r *http.Request, user database.User) {
+	type parameters struct {
+		FeedID string `json:"feed_id"`
+	}
+	decoder := json.NewDecoder(r.Body)
+	params := parameters{}
+	err := decoder.Decode(&params)
+	if err != nil {
+		// an error will be thrown if the JSON is invalid or has the wrong types
+		// any missing fields will have their values in the struct set to their zero value
+		log.Printf("Error decoding parameters: %s", err)
+		respondWithError(w, 500, "Something went wrong")
+		return
+	}
+
+	feedID, err := uuid.Parse(params.FeedID)
+	if err != nil {
+		respondWithError(w, 400, "Invalid FeedID")
+	}
+	followParams := database.FollowFeedParams{
+		ID:        uuid.New(),
+		UserID:    user.ID,
+		FeedID:    feedID,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	follow, err := cfg.DB.FollowFeed(r.Context(), followParams)
+	if err != nil {
+		log.Printf("Error following feed: %s", err)
+		respondWithError(w, 500, "Something went wrong")
+		return
+	}
+	respondWithJSON(w, 201, follow)
+}
+
+// Unfollows a feed
+func (cfg *apiConfig) handlerFeedFollowsDelete(w http.ResponseWriter, r *http.Request, user database.User) {
+	feedFollowString := chi.URLParam(r, "id")
+	feedFollowUUID, err := uuid.Parse(feedFollowString)
+	if err != nil {
+		log.Printf("Error parsing id: %s", err)
+		respondWithError(w, 400, "Invalid FollowFeedID")
+		return
+	}
+
+	unfollowParams := database.UnfollowFeedParams{
+		ID:     feedFollowUUID,
+		UserID: user.ID,
+	}
+	err = cfg.DB.UnfollowFeed(r.Context(), unfollowParams)
+	if err != nil {
+		log.Printf("Error unfollowing: %s", err)
+		respondWithError(w, 500, "Internal server error")
+		return
+	}
+	respondWithJSON(w, 200, "OK")
+}
+
+// Gets all followed feeds
+func (cfg *apiConfig) handlerFeedFollowsGet(w http.ResponseWriter, r *http.Request, user database.User) {
+	feedFollows, err := cfg.DB.GetFollowedFeeds(r.Context(), user.ID)
+	if err != nil {
+		respondWithError(w, 500, "Internal server error")
+		return
+	}
+	respondWithJSON(w, 200, feedFollows)
 }
 
 // Returns 200 status
