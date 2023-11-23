@@ -135,12 +135,13 @@ func (cfg *apiConfig) handlerFeedsPost(w http.ResponseWriter, r *http.Request, u
 		Url:       params.URL,
 		UserID:    user.ID,
 	}
-	feed, err := cfg.DB.CreateFeed(r.Context(), feedParams)
+	dbFeed, err := cfg.DB.CreateFeed(r.Context(), feedParams)
 	if err != nil {
 		log.Printf("Error creating feed: %s", err)
 		respondWithError(w, 500, "Something went wrong")
 		return
 	}
+	feed := databaseFeedToFeed(dbFeed)
 
 	followParams := database.FollowFeedParams{
 		ID:        uuid.New(),
@@ -157,7 +158,7 @@ func (cfg *apiConfig) handlerFeedsPost(w http.ResponseWriter, r *http.Request, u
 	}
 
 	payload := struct {
-		Feed       database.Feed       `json:"feed"`
+		Feed       Feed                `json:"feed"`
 		FeedFollow database.FeedFollow `json:"feed_follow"`
 	}{
 		Feed:       feed,
@@ -281,6 +282,33 @@ func respondWithError(w http.ResponseWriter, code int, msg string) {
 		Error: msg,
 	}
 	respondWithJSON(w, code, response)
+}
+
+type Feed struct {
+	ID            uuid.UUID  `json:"id"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
+	Name          string     `json:"name"`
+	Url           string     `json:"url"`
+	UserID        uuid.UUID  `json:"user_id"`
+	LastFetchedAt *time.Time `json:"last_fetched_at"`
+}
+
+// Helper func that converts database.Feed to Feed, for better looking JSON responses
+func databaseFeedToFeed(dbFeed database.Feed) Feed {
+	feed := Feed{
+		ID:        dbFeed.ID,
+		CreatedAt: dbFeed.CreatedAt,
+		UpdatedAt: dbFeed.UpdatedAt,
+		Name:      dbFeed.Name,
+		Url:       dbFeed.Url,
+		UserID:    dbFeed.UserID,
+	}
+	// If dbFeed.LastFetchedAt is NULL, keep the zero value (nil) of feed.LastFetchedAt
+	if dbFeed.LastFetchedAt.Valid == true {
+		feed.LastFetchedAt = &dbFeed.LastFetchedAt.Time
+	}
+	return feed
 }
 
 // Middleware helper that authenticates a user before handing off the request to the handler
