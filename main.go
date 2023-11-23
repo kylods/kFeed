@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"encoding/xml"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -26,6 +28,14 @@ type authedHandler func(http.ResponseWriter, *http.Request, database.User)
 // For accessing the DB server, used in main()
 type apiConfig struct {
 	DB *database.Queries
+}
+
+// dateLayouts is a slice of potential date layouts RSS feeds might use
+var dateLayouts = []string{
+	time.RFC1123,
+	time.RFC1123Z,
+	"Mon, 02 Jan 2006 15:04:05 MST",
+	// Add more layouts as needed
 }
 
 // Used in databaseFeedToFeed()
@@ -55,6 +65,7 @@ type Item struct {
 	Title       string `xml:"title"`
 	Link        string `xml:"link"`
 	Description string `xml:"description"`
+	PubDate     string `xml:"pubDate"`
 }
 
 func main() {
@@ -90,6 +101,9 @@ func main() {
 	mainRouter.Use(cors.Handler(cors.Options{}))
 	mainRouter.Mount("/v1", v1Router)
 
+	// Start the worker for fetching feeds
+	go apiCfg.fetchFeedsWorker()
+
 	// Initialize server & starts listening for connections
 	srv := &http.Server{
 		Addr:    ":" + port,
@@ -100,12 +114,16 @@ func main() {
 }
 
 func testFunc(w http.ResponseWriter, r *http.Request) {
-	rssFeed, err := getRSSFeedData("https://blog.boot.dev/index.xml")
+	rssFeed, err := fetchRSSFeedData("https://blog.boot.dev/index.xml")
 	if err != nil {
 		respondWithError(w, 500, err.Error())
 		return
 	}
-	respondWithJSON(w, 200, rssFeed)
+	titles := []string{}
+	for _, item := range rssFeed.Channel.Items {
+		titles = append(titles, item.Title)
+	}
+	respondWithJSON(w, 200, titles)
 }
 
 // Creates a user in the DB
@@ -358,18 +376,88 @@ func (cfg *apiConfig) middlewareAuth(handler authedHandler) http.HandlerFunc {
 	})
 }
 
+// Background goroutine for updating feeds
+func (cfg *apiConfig) fetchFeedsWorker() {
+	// Initialize variables & helper function
+	ctx := context.TODO()
+	ticker := time.Tick(time.Minute)
+	fetchAndMarkDone := func(wg *sync.WaitGroup, feed database.Feed) {
+		// Fetch each feed's data
+		defer wg.Done()
+		rss, err := fetchRSSFeedData(feed.Url)
+		cfg.DB.MarkFeedFetched(ctx, feed.ID)
+		if err != nil {
+			fmt.Printf("Error fetching %v: %v\n", feed.Url, err)
+			return
+		}
+
+		fmt.Printf("Fetched %v with %v posts!\n", rss.Channel.Title, len(rss.Channel.Items))
+
+		// Recursively adds each post to the database
+		for _, post := range rss.Channel.Items {
+			// Attempts to parse posts 'description' & 'published date' to sql.NullString & sql.NullTime types respectively
+			var postDescription sql.NullString
+			var postPubDate sql.NullTime
+			if post.Description != "" {
+				postDescription.String = post.Description
+				postDescription.Valid = true
+			}
+			if post.PubDate != "" {
+				t, err := parseDate(post.PubDate)
+				if err == nil {
+					postPubDate.Valid = true
+					postPubDate.Time = t
+				}
+			}
+
+			// Assembles post data into a struct, then passes it to the database
+			postParams := database.AddPostParams{
+				ID:          uuid.New(),
+				Title:       post.Title,
+				Url:         post.Link,
+				Description: postDescription,
+				PublishedAt: postPubDate,
+				FeedID:      feed.ID,
+			}
+			cfg.DB.AddPost(ctx, postParams)
+		}
+	}
+	for {
+		// Only lets the loop run once every minute, or the duration set on "ticker"s initialization
+		<-ticker
+
+		feedsToFetch, err := cfg.DB.GetNextFeedsToFetch(ctx, 10)
+		if err != nil {
+			fmt.Printf("Error fetching feeds: %v", err)
+			continue
+		}
+
+		fmt.Printf("Fetching %v feeds...\n", len(feedsToFetch))
+
+		// Creates a goroutine for each feed to fetch
+		waitGroup := sync.WaitGroup{}
+		waitGroup.Add(len(feedsToFetch))
+		for _, feed := range feedsToFetch {
+			go fetchAndMarkDone(&waitGroup, feed)
+		}
+		// Waits until all goroutines have finished
+		waitGroup.Wait()
+		fmt.Println("Finished processing feeds!")
+	}
+}
+
 // Fetches data from an RSS feed
-func getRSSFeedData(url string) (Rss, error) {
+func fetchRSSFeedData(url string) (Rss, error) {
 	resp, err := http.Get(url)
 	if err != nil {
 		return Rss{}, fmt.Errorf("GET error: %v", err)
 	}
 	defer resp.Body.Close()
 
+	// Checks status code & content-type header
 	if resp.StatusCode != http.StatusOK {
 		return Rss{}, fmt.Errorf("status error: %v", resp.StatusCode)
 	}
-
 	if contentType := resp.Header.Get("content-type"); contentType != "application/xml" {
 		return Rss{}, fmt.Errorf("invalid response 'content-type': %v", contentType)
 	}
@@ -380,11 +468,22 @@ func getRSSFeedData(url string) (Rss, error) {
 	}
 
 	rssFeed := Rss{}
-
 	err = xml.Unmarshal(data, &rssFeed)
 	if err != nil {
 		return Rss{}, fmt.Errorf("XML decode error: %v", err)
 	}
 
 	return rssFeed, nil
+}
+
+func parseDate(dateStr string) (time.Time, error) {
+	var t time.Time
+	var err error
+	for _, layout := range dateLayouts {
+		t, err = time.Parse(layout, dateStr)
+		if err == nil {
+			return t, nil
+		}
+	}
+	return t, err
 }

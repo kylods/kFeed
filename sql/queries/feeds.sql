@@ -13,6 +13,6 @@ LIMIT $1;
 
 -- name: MarkFeedFetched :one
 UPDATE feeds
-SET updated_at = $1, last_fetched_at = $1
-WHERE id = $2
+SET updated_at = LOCALTIMESTAMP, last_fetched_at = LOCALTIMESTAMP
+WHERE id = $1
 RETURNING *;
