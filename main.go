@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -47,6 +48,18 @@ type Feed struct {
 	Url           string     `json:"url"`
 	UserID        uuid.UUID  `json:"user_id"`
 	LastFetchedAt *time.Time `json:"last_fetched_at"`
+}
+
+// Used in databasePostToPost()
+type Post struct {
+	ID          uuid.UUID `json:"id"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	Title       string    `json:"title"`
+	Url         string    `json:"url"`
+	Description string    `json:"description"`
+	PublishedAt time.Time `json:"published_at"`
+	FeedID      uuid.UUID `json:"feed_id"`
 }
 
 // Structs for RSS Feed data
@@ -92,10 +105,9 @@ func main() {
 	v1Router.Post("/feed_follows", apiCfg.middlewareAuth(apiCfg.handlerFeedFollowsPost))
 	v1Router.Delete("/feed_follows/{id}", apiCfg.middlewareAuth(apiCfg.handlerFeedFollowsDelete))
 	v1Router.Get("/feed_follows", apiCfg.middlewareAuth(apiCfg.handlerFeedFollowsGet))
+	v1Router.Get("/posts", apiCfg.middlewareAuth(apiCfg.handlerPostsGet))
 	v1Router.Get("/readiness", handlerReadinessGet)
 	v1Router.Get("/err", errTest)
-
-	v1Router.Get("/test", testFunc)
 
 	mainRouter := chi.NewRouter()
 	mainRouter.Use(cors.Handler(cors.Options{}))
@@ -111,19 +123,6 @@ func main() {
 	}
 
 	log.Fatal(srv.ListenAndServe())
-}
-
-func testFunc(w http.ResponseWriter, r *http.Request) {
-	rssFeed, err := fetchRSSFeedData("https://blog.boot.dev/index.xml")
-	if err != nil {
-		respondWithError(w, 500, err.Error())
-		return
-	}
-	titles := []string{}
-	for _, item := range rssFeed.Channel.Items {
-		titles = append(titles, item.Title)
-	}
-	respondWithJSON(w, 200, titles)
 }
 
 // Creates a user in the DB
@@ -306,6 +305,34 @@ func (cfg *apiConfig) handlerFeedFollowsGet(w http.ResponseWriter, r *http.Reque
 	respondWithJSON(w, 200, feedFollows)
 }
 
+// Gets all posts for user's followed feeds
+func (cfg *apiConfig) handlerPostsGet(w http.ResponseWriter, r *http.Request, user database.User) {
+	limitStr := r.URL.Query().Get("limit")
+	limitInt := 20
+	if limitStr != "" {
+		if i, err := strconv.Atoi(limitStr); err == nil {
+			limitInt = i
+		}
+	}
+	getPostsParams := database.GetPostsByUserParams{
+		UserID: user.ID,
+		Limit:  int32(limitInt),
+	}
+
+	posts, err := cfg.DB.GetPostsByUser(r.Context(), getPostsParams)
+	if err != nil {
+		respondWithError(w, 500, "Internal server error")
+		return
+	}
+
+	var payload []Post
+
+	for _, post := range posts {
+		payload = append(payload, databasePostToPost(post))
+	}
+	respondWithJSON(w, 200, payload)
+}
+
 // Returns 200 status
 func handlerReadinessGet(w http.ResponseWriter, r *http.Request) {
 	response := struct {
@@ -359,6 +386,26 @@ func databaseFeedToFeed(dbFeed database.Feed) Feed {
 		feed.LastFetchedAt = &dbFeed.LastFetchedAt.Time
 	}
 	return feed
+}
+
+// Helper func that converts database.Post to Post, for better looking JSON responses
+func databasePostToPost(dbPost database.Post) Post {
+	post := Post{
+		ID:        dbPost.ID,
+		CreatedAt: dbPost.CreatedAt,
+		UpdatedAt: dbPost.UpdatedAt,
+		Title:     dbPost.Title,
+		Url:       dbPost.Url,
+		FeedID:    dbPost.FeedID,
+	}
+	// If NULL, keep the zero value (nil)
+	if dbPost.Description.Valid {
+		post.Description = dbPost.Description.String
+	}
+	if dbPost.PublishedAt.Valid {
+		post.PublishedAt = dbPost.PublishedAt.Time
+	}
+	return post
 }
 
 // Middleware helper that authenticates a user before handing off the request to the handler

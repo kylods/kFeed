@@ -44,10 +44,17 @@ WHERE feed_id IN (
     SELECT feed_id FROM feed_follows
     WHERE user_id = $1
 )
+ORDER BY published_at DESC
+LIMIT $2
 `
 
-func (q *Queries) GetPostsByUser(ctx context.Context, userID uuid.UUID) ([]Post, error) {
-	rows, err := q.db.QueryContext(ctx, getPostsByUser, userID)
+type GetPostsByUserParams struct {
+	UserID uuid.UUID `json:"user_id"`
+	Limit  int32     `json:"limit"`
+}
+
+func (q *Queries) GetPostsByUser(ctx context.Context, arg GetPostsByUserParams) ([]Post, error) {
+	rows, err := q.db.QueryContext(ctx, getPostsByUser, arg.UserID, arg.Limit)
 	if err != nil {
 		return nil, err
 	}
