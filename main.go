@@ -3,7 +3,9 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -24,6 +26,35 @@ type authedHandler func(http.ResponseWriter, *http.Request, database.User)
 // For accessing the DB server, used in main()
 type apiConfig struct {
 	DB *database.Queries
+}
+
+// Used in databaseFeedToFeed()
+type Feed struct {
+	ID            uuid.UUID  `json:"id"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
+	Name          string     `json:"name"`
+	Url           string     `json:"url"`
+	UserID        uuid.UUID  `json:"user_id"`
+	LastFetchedAt *time.Time `json:"last_fetched_at"`
+}
+
+// Structs for RSS Feed data
+type Rss struct {
+	Channel Channel `xml:"channel"`
+}
+
+type Channel struct {
+	Title       string `xml:"title"`
+	Link        string `xml:"link"`
+	Description string `xml:"description"`
+	Items       []Item `xml:"item"`
+}
+
+type Item struct {
+	Title       string `xml:"title"`
+	Link        string `xml:"link"`
+	Description string `xml:"description"`
 }
 
 func main() {
@@ -53,6 +84,8 @@ func main() {
 	v1Router.Get("/readiness", handlerReadinessGet)
 	v1Router.Get("/err", errTest)
 
+	v1Router.Get("/test", testFunc)
+
 	mainRouter := chi.NewRouter()
 	mainRouter.Use(cors.Handler(cors.Options{}))
 	mainRouter.Mount("/v1", v1Router)
@@ -64,6 +97,15 @@ func main() {
 	}
 
 	log.Fatal(srv.ListenAndServe())
+}
+
+func testFunc(w http.ResponseWriter, r *http.Request) {
+	rssFeed, err := getRSSFeedData("https://blog.boot.dev/index.xml")
+	if err != nil {
+		respondWithError(w, 500, err.Error())
+		return
+	}
+	respondWithJSON(w, 200, rssFeed)
 }
 
 // Creates a user in the DB
@@ -284,16 +326,6 @@ func respondWithError(w http.ResponseWriter, code int, msg string) {
 	respondWithJSON(w, code, response)
 }
 
-type Feed struct {
-	ID            uuid.UUID  `json:"id"`
-	CreatedAt     time.Time  `json:"created_at"`
-	UpdatedAt     time.Time  `json:"updated_at"`
-	Name          string     `json:"name"`
-	Url           string     `json:"url"`
-	UserID        uuid.UUID  `json:"user_id"`
-	LastFetchedAt *time.Time `json:"last_fetched_at"`
-}
-
 // Helper func that converts database.Feed to Feed, for better looking JSON responses
 func databaseFeedToFeed(dbFeed database.Feed) Feed {
 	feed := Feed{
@@ -305,7 +337,7 @@ func databaseFeedToFeed(dbFeed database.Feed) Feed {
 		UserID:    dbFeed.UserID,
 	}
 	// If dbFeed.LastFetchedAt is NULL, keep the zero value (nil) of feed.LastFetchedAt
-	if dbFeed.LastFetchedAt.Valid == true {
+	if dbFeed.LastFetchedAt.Valid {
 		feed.LastFetchedAt = &dbFeed.LastFetchedAt.Time
 	}
 	return feed
@@ -324,4 +356,35 @@ func (cfg *apiConfig) middlewareAuth(handler authedHandler) http.HandlerFunc {
 		}
 		handler(w, r, user)
 	})
+}
+
+// Fetches data from an RSS feed
+func getRSSFeedData(url string) (Rss, error) {
+	resp, err := http.Get(url)
+	if err != nil {
+		return Rss{}, fmt.Errorf("GET error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return Rss{}, fmt.Errorf("status error: %v", resp.StatusCode)
+	}
+
+	if contentType := resp.Header.Get("content-type"); contentType != "application/xml" {
+		return Rss{}, fmt.Errorf("invalid response 'content-type': %v", contentType)
+	}
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return Rss{}, fmt.Errorf("read body: %v", err)
+	}
+
+	rssFeed := Rss{}
+
+	err = xml.Unmarshal(data, &rssFeed)
+	if err != nil {
+		return Rss{}, fmt.Errorf("XML decode error: %v", err)
+	}
+
+	return rssFeed, nil
 }
